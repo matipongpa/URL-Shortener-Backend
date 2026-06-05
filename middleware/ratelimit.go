@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"math"
 	"net"
 	"net/http"
@@ -90,4 +91,43 @@ func (l *Limiter) getBucket(ip string) *bucket {
 	}
 	l.buckets[ip] = b
 	return b
+}
+
+func (l *Limiter) StartEvictor(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			l.evict(60 * time.Second)
+		}
+	}
+}
+
+func (l *Limiter) evict(idleAfter time.Duration) {
+	now := time.Now()
+
+	var staleKeys []string
+	l.mu.RLock()
+	for k, b := range l.buckets {
+		b.mu.Lock()
+		if now.Sub(b.lastRefill) > idleAfter {
+			staleKeys = append(staleKeys, k)
+		}
+		b.mu.Unlock()
+	}
+	l.mu.RUnlock()
+
+	l.mu.Lock()
+	for _, k := range staleKeys {
+		l.buckets[k].mu.Lock()
+		if b, ok := l.buckets[k]; ok && now.Sub(b.lastRefill) > idleAfter {
+			delete(l.buckets, k)
+		}
+		l.buckets[k].mu.Unlock()
+	}
+	l.mu.Unlock()
+
 }
